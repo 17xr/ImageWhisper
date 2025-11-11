@@ -1,0 +1,21 @@
+import torch
+
+BEAM_SIZE = 3
+DEPTH = 6
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+DIVERSITY_PENALTY = 1.2
+DROPOUT = 0.1
+EMBED_DIM = 768
+IMAGE_ENCODER_ID = "facebook/dinov3-vits16plus-pretrain-lvd1689m"
+INIT_TEMPERATURE = 1.4
+INIT_TOP_K = 35
+MAX_LEN = 72
+MAX_SEQ_LEN = 256
+MODEL_PATH = "model/model.pt"
+NO_REPEAT_NGRAM_SIZE = 4
+NUM_HEADS = 16
+STOCHASTIC_INIT_STEPS = 3
+TEMPERATURE = 1.2
+TEXT_ENCODER_ID = "intfloat/e5-base-v2"
+TOP_K = 80
+TRANSFORM_IMAGE_SIZE = (256, 256)
