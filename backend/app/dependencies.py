@@ -1,27 +1,23 @@
 import torch
 from app.config import (
-    BEAM_SIZE,
     DEPTH,
     DEVICE,
-    DIVERSITY_PENALTY,
-    DROPOUT,
     EMBED_DIM,
-    INIT_TEMPERATURE,
-    INIT_TOP_K,
-    MAX_LEN,
-    MAX_SEQ_LEN,
+    MAX_LENGTH,
     MODEL_PATH,
     NO_REPEAT_NGRAM_SIZE,
+    NUM_CAPTIONS,
     NUM_HEADS,
-    STOCHASTIC_INIT_STEPS,
+    REPETITION_PENALTY,
     TEMPERATURE,
     TEXT_ENCODER_ID,
-    TOP_K
+    TOP_K,
+    TOP_P
 )
 
 from architecture.transformer import ImageCaption
 from transformers import AutoModel, AutoTokenizer
-from utils.utils import beam_search_generate, format_caption
+from utils.utils import nucleus_sampling_generate, format_caption
 
 tokenizer = AutoTokenizer.from_pretrained(TEXT_ENCODER_ID)
 word_embeddings = AutoModel.from_pretrained(
@@ -34,31 +30,28 @@ model = ImageCaption(
     tokenizer,
     EMBED_DIM,
     NUM_HEADS,
-    MAX_SEQ_LEN,
+    MAX_LENGTH,
     DEPTH,
-    DROPOUT,
 )
 
-model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
+model.load_state_dict(torch.load(MODEL_PATH, weights_only=True, map_location=DEVICE))
 model.to(DEVICE)
 model.eval()
 
 
 def generate_caption(tensor):
-    captions = beam_search_generate(
+    captions = nucleus_sampling_generate(
         model,
         tensor,
         tokenizer,
-        device=DEVICE,
-        max_length=MAX_LEN,
-        beam_size=BEAM_SIZE,
-        no_repeat_ngram_size=NO_REPEAT_NGRAM_SIZE,
+        DEVICE,
+        num_captions=NUM_CAPTIONS,
+        max_length=MAX_LENGTH,
         temperature=TEMPERATURE,
         top_k=TOP_K,
-        diversity_penalty=DIVERSITY_PENALTY,
-        stochastic_init_steps=STOCHASTIC_INIT_STEPS,
-        init_top_k=INIT_TOP_K,
-        init_temperature=INIT_TEMPERATURE,
+        top_p=TOP_P,
+        no_repeat_ngram_size=NO_REPEAT_NGRAM_SIZE,
+        repetition_penalty=REPETITION_PENALTY,
     )
 
     return [format_caption(caption) for caption in captions]

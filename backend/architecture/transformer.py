@@ -1,7 +1,7 @@
+import torch.nn.functional as F
 import torch
-from torch import nn
-from torch.nn.functional import silu
 from transformers import AutoModel
+from torch import nn
 
 
 def _init_weights(module):
@@ -61,12 +61,12 @@ class RotaryPositionalEmbeddings(nn.Module):
         x1 = x[..., 0::2]
         x2 = x[..., 1::2]
 
-        embeddings = torch.stack((x1 * cos - x2 * sin, x2 * cos + x1 * sin), dim=-1)
-        return embeddings.flatten(-2)
+        embeddings = torch.cat((x1 * cos - x2 * sin, x2 * cos + x1 * sin), dim=-1)
+        return embeddings
 
 
 class BaseMultiHeadAttention(nn.Module):
-    def __init__(self, embed_dim, num_heads, max_seq_len, dropout=0.1):
+    def __init__(self, embed_dim, num_heads, max_seq_len):
         super(BaseMultiHeadAttention, self).__init__()
 
         self.embed_dim = embed_dim
@@ -79,7 +79,6 @@ class BaseMultiHeadAttention(nn.Module):
         self.q_norm = nn.RMSNorm(self.head_dim)
         self.k_norm = nn.RMSNorm(self.head_dim)
         self.rope = RotaryPositionalEmbeddings(max_seq_len, self.head_dim)
-        self.dropout = nn.Dropout(dropout)
         self.proj = nn.Linear(embed_dim, embed_dim)
 
     def _prepare_qkv(self, q, k, v):
@@ -119,10 +118,8 @@ class BaseMultiHeadAttention(nn.Module):
 
 
 class SelfMultiHeadAttention(BaseMultiHeadAttention):
-    def __init__(self, embed_dim, num_heads, max_seq_len, dropout=0.1):
-        super(SelfMultiHeadAttention, self).__init__(
-            embed_dim, num_heads, max_seq_len, dropout
-        )
+    def __init__(self, embed_dim, num_heads, max_seq_len):
+        super(SelfMultiHeadAttention, self).__init__(embed_dim, num_heads, max_seq_len)
 
         self.q_proj = nn.Linear(embed_dim, embed_dim, bias=False)
         self.k_proj = nn.Linear(embed_dim, embed_dim, bias=False)
@@ -144,16 +141,14 @@ class SelfMultiHeadAttention(BaseMultiHeadAttention):
 
         alignment = self._apply_mask(q, k, attn_mask, padding_mask)
         attention = torch.softmax(alignment, dim=-1)
-        context = torch.matmul(self.dropout(attention), v)
+        context = torch.matmul(attention, v)
         out = context.transpose(1, 2).reshape(batch_size, seq_length, embed_dim)
         return x + self.proj(out)
 
 
 class CrossMultiHeadAttention(BaseMultiHeadAttention):
-    def __init__(self, embed_dim, num_heads, max_seq_len, dropout=0.1):
-        super(CrossMultiHeadAttention, self).__init__(
-            embed_dim, num_heads, max_seq_len, dropout
-        )
+    def __init__(self, embed_dim, num_heads, max_seq_len):
+        super(CrossMultiHeadAttention, self).__init__(embed_dim, num_heads, max_seq_len)
 
         self.q_proj = nn.Linear(embed_dim, embed_dim, bias=False)
 
@@ -166,13 +161,13 @@ class CrossMultiHeadAttention(BaseMultiHeadAttention):
 
         alignment = self._apply_mask(q, k, attn_mask, padding_mask)
         attention = torch.softmax(alignment, dim=-1)
-        context = torch.matmul(self.dropout(attention), v)
+        context = torch.matmul(attention, v)
         out = context.transpose(1, 2).reshape(batch_size, seq_length, embed_dim)
         return x + self.proj(out)
 
 
 class FeedForward(nn.Module):
-    def __init__(self, embed_dim, hidden_dim, dropout=0.1):
+    def __init__(self, embed_dim, hidden_dim):
         super(FeedForward, self).__init__()
 
         self.pre_norm = nn.RMSNorm(embed_dim)
@@ -180,27 +175,24 @@ class FeedForward(nn.Module):
         self.feature = nn.Linear(embed_dim, hidden_dim)
         self.gate = nn.Linear(embed_dim, hidden_dim)
         self.proj = nn.Linear(hidden_dim, embed_dim)
-        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
         x_norm = self.pre_norm(x)
-        feature = silu(self.feature(x_norm))
+        feature = F.silu(self.feature(x_norm))
         gate = self.gate(x_norm)
         output = x + self.proj(feature * gate)
-        return self.dropout(output)
+        return output
 
 
 class DecoderTransformerBlock(nn.Module):
-    def __init__(self, embed_dim, num_heads, max_seq_len, dropout=0.1):
+    def __init__(self, embed_dim, num_heads, max_seq_len):
         super(DecoderTransformerBlock, self).__init__()
 
-        self.self_attention = SelfMultiHeadAttention(
-            embed_dim, num_heads, max_seq_len, dropout
-        )
+        self.self_attention = SelfMultiHeadAttention(embed_dim, num_heads, max_seq_len)
         self.cross_attention = CrossMultiHeadAttention(
-            embed_dim, num_heads, max_seq_len, dropout
+            embed_dim, num_heads, max_seq_len
         )
-        self.feed_forward = FeedForward(embed_dim, embed_dim * 3, dropout)
+        self.feed_forward = FeedForward(embed_dim, embed_dim * 3)
 
     def forward(self, x, k, v, attn_mask=None, padding_mask=None):
         self_attention = self.self_attention(x, attn_mask, padding_mask)
@@ -211,16 +203,14 @@ class DecoderTransformerBlock(nn.Module):
 
 
 class DecoderTransformer(nn.Module):
-    def __init__(
-        self, vocab_size, embed_dim, num_heads, max_seq_len, depth, dropout=0.1
-    ):
+    def __init__(self, vocab_size, embed_dim, num_heads, max_seq_len, depth):
         super(DecoderTransformer, self).__init__()
 
         assert embed_dim % num_heads == 0
 
         self.decoder_blocks = nn.ModuleList(
             [
-                DecoderTransformerBlock(embed_dim, num_heads, max_seq_len, dropout)
+                DecoderTransformerBlock(embed_dim, num_heads, max_seq_len)
                 for _ in range(depth)
             ]
         )
@@ -246,14 +236,13 @@ class ImageCaption(nn.Module):
         num_heads,
         max_seq_len,
         depth,
-        dropout=0.1,
     ):
         super(ImageCaption, self).__init__()
 
         self.text_embeddings = text_embeddings
         self.vision_encoder = ImageEncoder(embed_dim)
         self.text_transformer = DecoderTransformer(
-            tokenizer.vocab_size, embed_dim, num_heads, max_seq_len, depth, dropout
+            tokenizer.vocab_size, embed_dim, num_heads, max_seq_len, depth
         )
 
         self.device = device

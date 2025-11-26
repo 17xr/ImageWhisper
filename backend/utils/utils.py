@@ -2,196 +2,111 @@ import torch
 import torch.nn.functional as F
 
 
-def beam_search_generate(
+def nucleus_sampling_generate(
     model,
     image,
     tokenizer,
     device,
+    num_captions=5,
     max_length=64,
-    beam_size=4,
-    no_repeat_ngram_size=2,
-    temperature=1.5,
-    top_k=100,
-    diversity_penalty=1.0,
-    stochastic_init_steps=3,
-    init_top_k=30,
-    init_temperature=1.4,
+    temperature=0.7,
+    top_k=30,
+    top_p=0.9,
+    no_repeat_ngram_size=0,
+    repetition_penalty=1.2,
 ):
-    model.eval()
-
     start_token = tokenizer.cls_token_id
     end_token = tokenizer.sep_token_id
 
     with torch.no_grad():
         image_features = image.to(device)
 
-    init_seq = torch.tensor([[start_token]], device=device)
-    init_kpm = torch.ones(1, 1, dtype=torch.bool, device=device)
+        target_shape = list(image_features.shape)
+        target_shape[0] = num_captions
+        image_features = image_features.expand(*target_shape)
 
-    beams = [{"seq": init_seq, "score": 0.0, "kpm": init_kpm, "ngrams": set()}]
+    curr_seq = torch.full(
+        (num_captions, 1), start_token, device=device, dtype=torch.long
+    )
+    curr_pm = torch.ones(num_captions, 1, device=device, dtype=torch.bool)
+    unfinished_sequences = torch.ones(num_captions, dtype=torch.long, device=device)
 
-    for _ in range(stochastic_init_steps):
-        new_beams = []
-        for b in beams:
-            with torch.no_grad():
-                logits = model(image_features, b["seq"], b["kpm"], b["kpm"])
-                log_probs = F.log_softmax(
-                    logits[0, -1] / max(init_temperature, 1e-8), dim=-1
-                )
-            top_vals, top_idx = torch.topk(log_probs, init_top_k)
-            probs = top_vals.exp()
-            probs /= probs.sum()
-            sampled = torch.multinomial(probs, beam_size, replacement=False)
+    for step in range(max_length):
+        L = curr_seq.size(1)
+        attn_mask = torch.tril(torch.ones((num_captions, L, L), device=device))
 
-            for s_idx in sampled.tolist():
-                token_id = int(top_idx[s_idx].item())
-                token_logprob = float(top_vals[s_idx].item())
-                new_seq = torch.cat(
-                    [b["seq"], torch.tensor([[token_id]], device=device)], dim=1
-                )
-                new_kpm = torch.cat(
-                    [b["kpm"], torch.ones(1, 1, dtype=torch.bool, device=device)], dim=1
-                )
-                new_ngrams = set(b["ngrams"])
-                if (
-                    no_repeat_ngram_size > 0
-                    and len(b["seq"][0]) >= no_repeat_ngram_size - 1
-                ):
-                    new_ngrams.add(
-                        tuple(
-                            b["seq"][0, -no_repeat_ngram_size + 1 :].tolist()
-                            + [token_id]
-                        )
-                    )
-                new_beams.append(
-                    {
-                        "seq": new_seq,
-                        "score": b["score"] + token_logprob,
-                        "kpm": new_kpm,
-                        "ngrams": new_ngrams,
-                    }
-                )
+        with torch.no_grad():
+            logits = model(image_features, curr_seq, attn_mask, curr_pm)
+            next_token_logits = logits[:, -1, :] / max(temperature, 1e-8)
 
-        new_beams.sort(key=lambda x: x["score"] / x["seq"].size(1), reverse=True)
-        beams = new_beams[:beam_size]
-
-    completed = []
-    for step in range(stochastic_init_steps + 1, max_length):
-        if not beams:
-            break
-
-        all_candidates = []
-        proposal_counts = {}
-        beam_proposals = []
-
-        for b in beams:
-            last_token = b["seq"][0, -1].item()
-            if last_token == end_token:
-                completed.append(b)
-                continue
-
-            L = b["seq"].size(1)
-            attn_mask = torch.tril(torch.ones((1, L, L), device=device))
-
-            with torch.no_grad():
-                logits = model(image_features, b["seq"], attn_mask, b["kpm"])
-                log_probs = F.log_softmax(
-                    logits[0, -1] / max(temperature, 1e-8), dim=-1
-                )
-
-            top_k_val = min(top_k, log_probs.size(-1))
-            top_vals, top_idx = torch.topk(log_probs, top_k_val)
-            beam_proposals.append((b, top_vals, top_idx))
-
-            for tok in top_idx.tolist():
-                proposal_counts[tok] = proposal_counts.get(tok, 0) + 1
-
-        if not beam_proposals:
-            break
-
-        for b, top_vals, top_idx in beam_proposals:
-            current_tokens = b["seq"][0].tolist()
-            penalty = torch.tensor(
-                [proposal_counts[tok.item()] for tok in top_idx],
-                device=device,
-                dtype=top_vals.dtype,
+        if repetition_penalty > 1.0:
+            score = torch.gather(next_token_logits, 1, curr_seq)
+            score = torch.where(
+                score < 0, score * repetition_penalty, score / repetition_penalty
             )
-            adjusted_logits = top_vals - diversity_penalty * penalty
-            probs = F.softmax(adjusted_logits, dim=-1)
+            next_token_logits.scatter_(1, curr_seq, score)
 
-            num_samples = min(beam_size, probs.size(0))
-            sampled_indices = torch.multinomial(probs, num_samples, replacement=False)
+        if no_repeat_ngram_size > 0 and L >= no_repeat_ngram_size - 1:
+            for idx in range(num_captions):
+                current_tokens = curr_seq[idx].tolist()
+                check_ngram = tuple(current_tokens[-(no_repeat_ngram_size - 1) :])
 
-            for s_idx in sampled_indices.tolist():
-                token_id = int(top_idx[s_idx].item())
-                token_logprob = float(top_vals[s_idx].item())
+                for i in range(len(current_tokens) - no_repeat_ngram_size + 1):
+                    if (
+                        tuple(current_tokens[i : i + no_repeat_ngram_size - 1])
+                        == check_ngram
+                    ):
+                        banned_token = current_tokens[i + no_repeat_ngram_size - 1]
+                        next_token_logits[idx, banned_token] = -float("inf")
 
-                block = False
-                if (
-                    no_repeat_ngram_size > 0
-                    and len(current_tokens) >= no_repeat_ngram_size - 1
-                ):
-                    prev = tuple(
-                        current_tokens[-(no_repeat_ngram_size - 1) :] + [token_id]
-                    )
-                    if prev in b["ngrams"]:
-                        block = True
-                if block:
-                    continue
+        if top_k > 0:
+            top_k_values, _ = torch.topk(next_token_logits, top_k)
+            min_values = top_k_values[..., -1, None]
+            top_k_mask = next_token_logits < min_values
+            next_token_logits[top_k_mask] = -float("inf")
 
-                new_seq = torch.cat(
-                    [b["seq"], torch.tensor([[token_id]], device=device)], dim=1
-                )
-                new_kpm = torch.cat(
-                    [b["kpm"], torch.ones(1, 1, dtype=torch.bool, device=device)], dim=1
-                )
-                new_score = b["score"] + token_logprob
+        if 0.0 < top_p < 1.0:
+            sorted_logits, sorted_indices = torch.sort(
+                next_token_logits, descending=True
+            )
+            cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
 
-                new_ngrams = set(b["ngrams"])
-                if (
-                    no_repeat_ngram_size > 0
-                    and len(current_tokens) >= no_repeat_ngram_size - 1
-                ):
-                    new_ngrams.add(
-                        tuple(
-                            current_tokens[-(no_repeat_ngram_size - 1) :] + [token_id]
-                        )
-                    )
+            sorted_indices_to_remove = cumulative_probs > top_p
+            sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[
+                ..., :-1
+            ].clone()
+            sorted_indices_to_remove[..., 0] = 0
 
-                all_candidates.append(
-                    {
-                        "seq": new_seq,
-                        "score": new_score,
-                        "kpm": new_kpm,
-                        "ngrams": new_ngrams,
-                    }
-                )
+            top_p_mask = torch.zeros_like(next_token_logits, dtype=torch.bool)
+            top_p_mask.scatter_(1, sorted_indices, sorted_indices_to_remove)
+            next_token_logits[top_p_mask] = -float("inf")
 
-        if not all_candidates:
+        probs = F.softmax(next_token_logits, dim=-1)
+        next_tokens = torch.multinomial(probs, num_samples=1)
+
+        next_tokens = next_tokens * unfinished_sequences.unsqueeze(1) + end_token * (
+            1 - unfinished_sequences.unsqueeze(1)
+        )
+
+        curr_seq = torch.cat([curr_seq, next_tokens], dim=1)
+        curr_pm = torch.cat(
+            [curr_pm, torch.ones(num_captions, 1, dtype=torch.bool, device=device)],
+            dim=1,
+        )
+
+        unfinished_sequences = unfinished_sequences.mul(
+            (next_tokens.squeeze() != end_token).long()
+        )
+
+        if unfinished_sequences.max() == 0:
             break
 
-        all_candidates.sort(key=lambda x: x["score"] / x["seq"].size(1), reverse=True)
-        beams = all_candidates[:beam_size]
+    generated_captions = []
+    for seq in curr_seq:
+        caption = tokenizer.decode(seq, skip_special_tokens=True).strip()
+        generated_captions.append(caption)
 
-    completed.extend(beams)
-    completed.sort(key=lambda x: x["score"] / x["seq"].size(1), reverse=True)
-
-    unique_captions = []
-    seen = set()
-    for b in completed:
-        tokens = b["seq"][0].cpu().numpy()
-        caption = tokenizer.decode(tokens, skip_special_tokens=True).strip()
-        if not caption:
-            continue
-        low = caption.lower()
-        if low in seen:
-            continue
-        seen.add(low)
-        unique_captions.append(caption)
-        if len(unique_captions) >= beam_size:
-            break
-
-    return unique_captions[:beam_size]
+    return generated_captions
 
 
 def format_caption(caption):

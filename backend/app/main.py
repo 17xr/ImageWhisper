@@ -1,11 +1,11 @@
 from io import BytesIO
 
 import torch
-from PIL import Image
-from app.config import TRANSFORM_IMAGE_SIZE
-from app.dependencies import generate_caption
-from fastapi import FastAPI, UploadFile, File, HTTPException
 from torchvision.transforms import v2
+from PIL import Image
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from app.dependencies import generate_caption
+from app.config import TRANSFORM_IMAGE_SIZE
 
 app = FastAPI(
     title="Image Captioning API",
@@ -39,4 +39,3 @@ async def caption(file: UploadFile = File(...)):
         return {"captions": captions}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    
