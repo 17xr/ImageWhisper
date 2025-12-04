@@ -1,6 +1,6 @@
 # Image Caption Generator
 
-We present an image captioning model that uses [facebook/dinov3](https://huggingface.co/facebook/dinov3-vits16plus-pretrain-lvd1689m) as the image encoder and leverages [intfloat/e5-base-v2](https://huggingface.co/intfloat/e5-base-v2) for tokenizer and embeddings. Its decoder follows a modern Qwen 3 inspired architecture to generate high-quality captions. The project includes a FastAPI backend for inference and a Streamlit frontend for interactive use.
+An image captioning model that uses [facebook/dinov3](https://huggingface.co/facebook/dinov3-vits16plus-pretrain-lvd1689m) as the image encoder and leverages [intfloat/e5-base-v2](https://huggingface.co/intfloat/e5-base-v2) for tokenizer and embeddings. Its decoder follows a modern Qwen 3 inspired architecture to generate high-quality captions. The project includes a FastAPI backend for inference and a Streamlit frontend for interactive use.
 
 ## 🧮 Requirements
 
